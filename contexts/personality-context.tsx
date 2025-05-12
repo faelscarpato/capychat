@@ -13,7 +13,6 @@ export interface Personality {
   avatar: string
   color: string
   isCustom?: boolean
-  userId?: string
 }
 
 export const defaultPersonalities: Personality[] = [
@@ -98,25 +97,28 @@ interface PersonalityContextType {
   addPersonality: (personality: Omit<Personality, "id">) => Promise<string>
   updatePersonality: (personality: Personality) => Promise<void>
   deletePersonality: (personalityId: string) => Promise<void>
+  loading: boolean
 }
 
 const PersonalityContext = createContext<PersonalityContextType | undefined>(undefined)
 
 export function PersonalityProvider({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
   const [personalities, setPersonalities] = useState<Personality[]>(defaultPersonalities)
   const [currentPersonality, setCurrentPersonalityState] = useState<Personality | null>(null)
-  const { user } = useAuth()
+  const [loading, setLoading] = useState(true)
 
-  // Carregar personalidades do Supabase
+  // Load custom personalities from Supabase
   useEffect(() => {
     const loadPersonalities = async () => {
       if (!user) return
 
       try {
+        setLoading(true)
         const { data, error } = await supabase.from("custom_personalities").select("*").eq("user_id", user.id)
 
         if (error) {
-          console.error("Erro ao carregar personalidades:", error)
+          console.error("Error loading personalities:", error)
           return
         }
 
@@ -129,13 +131,14 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
             avatar: p.avatar,
             color: p.color,
             isCustom: true,
-            userId: p.user_id,
           }))
 
           setPersonalities([...defaultPersonalities, ...customPersonalities])
         }
       } catch (error) {
-        console.error("Erro ao carregar personalidades:", error)
+        console.error("Error loading personalities:", error)
+      } finally {
+        setLoading(false)
       }
     }
 
@@ -147,18 +150,17 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
   const setCurrentPersonality = (personalityId: string) => {
     const personality = personalities.find((p) => p.id === personalityId) || null
     setCurrentPersonalityState(personality)
+
+    // Save to localStorage as backup
+    if (personality && user) {
+      localStorage.setItem(`currentPersonality_${user.id}`, personalityId)
+    }
   }
 
   const addPersonality = async (personality: Omit<Personality, "id">) => {
-    if (!user) throw new Error("Usuário não autenticado")
+    if (!user) throw new Error("User not authenticated")
 
     const newPersonalityId = uuidv4()
-    const newPersonality = {
-      ...personality,
-      id: newPersonalityId,
-      isCustom: true,
-      userId: user.id,
-    }
 
     try {
       const { error } = await supabase.from("custom_personalities").insert([
@@ -175,17 +177,23 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
 
       if (error) throw error
 
+      const newPersonality = {
+        ...personality,
+        id: newPersonalityId,
+        isCustom: true,
+      }
+
       setPersonalities((prev) => [...prev, newPersonality])
       return newPersonalityId
     } catch (error) {
-      console.error("Erro ao adicionar personalidade:", error)
+      console.error("Error adding personality:", error)
       throw error
     }
   }
 
   const updatePersonality = async (personality: Personality) => {
-    if (!user) throw new Error("Usuário não autenticado")
-    if (!personality.isCustom) throw new Error("Não é possível editar personalidades padrão")
+    if (!user) throw new Error("User not authenticated")
+    if (!personality.isCustom) throw new Error("Cannot edit default personalities")
 
     try {
       const { error } = await supabase
@@ -204,16 +212,16 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
 
       setPersonalities((prev) => prev.map((p) => (p.id === personality.id ? personality : p)))
     } catch (error) {
-      console.error("Erro ao atualizar personalidade:", error)
+      console.error("Error updating personality:", error)
       throw error
     }
   }
 
   const deletePersonality = async (personalityId: string) => {
-    if (!user) throw new Error("Usuário não autenticado")
+    if (!user) throw new Error("User not authenticated")
 
     const personality = personalities.find((p) => p.id === personalityId)
-    if (!personality?.isCustom) throw new Error("Não é possível excluir personalidades padrão")
+    if (!personality?.isCustom) throw new Error("Cannot delete default personalities")
 
     try {
       const { error } = await supabase
@@ -225,8 +233,13 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
       if (error) throw error
 
       setPersonalities((prev) => prev.filter((p) => p.id !== personalityId))
+
+      // If current personality is deleted, reset it
+      if (currentPersonality?.id === personalityId) {
+        setCurrentPersonalityState(null)
+      }
     } catch (error) {
-      console.error("Erro ao excluir personalidade:", error)
+      console.error("Error deleting personality:", error)
       throw error
     }
   }
@@ -240,6 +253,7 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
         addPersonality,
         updatePersonality,
         deletePersonality,
+        loading,
       }}
     >
       {children}
@@ -250,7 +264,7 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
 export function usePersonality() {
   const context = useContext(PersonalityContext)
   if (context === undefined) {
-    throw new Error("usePersonality deve ser usado dentro de um PersonalityProvider")
+    throw new Error("usePersonality must be used within a PersonalityProvider")
   }
   return context
 }

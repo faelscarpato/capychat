@@ -2,10 +2,11 @@ import type React from "react"
 import type { Metadata } from "next"
 import { Inter } from "next/font/google"
 import "./globals.css"
-import { ThemeProvider } from "@/components/theme-provider"
+import { ThemeProvider as NextThemeProvider } from "next-themes"
 import { PersonalityProvider } from "@/contexts/personality-context"
 import { ChatProvider } from "@/contexts/chat-context"
 import { AuthProvider } from "@/contexts/auth-context"
+import { ThemeProvider } from "@/contexts/theme-context"
 
 const inter = Inter({ subsets: ["latin"] })
 
@@ -23,13 +24,15 @@ export default function RootLayout({
   return (
     <html lang="pt-BR" suppressHydrationWarning>
       <body className={inter.className}>
-        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
+        <NextThemeProvider attribute="class" defaultTheme="dark" enableSystem>
           <AuthProvider>
-            <PersonalityProvider>
-              <ChatProvider>{children}</ChatProvider>
-            </PersonalityProvider>
+            <ThemeProvider>
+              <PersonalityProvider>
+                <ChatProvider>{children}</ChatProvider>
+              </PersonalityProvider>
+            </ThemeProvider>
           </AuthProvider>
-        </ThemeProvider>
+        </NextThemeProvider>
       </body>
     </html>
   )

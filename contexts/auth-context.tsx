@@ -1,23 +1,17 @@
 "use client"
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react"
+import { createContext, useContext, useState, useEffect, type ReactNode } from "react"
+import { v4 as uuidv4 } from "uuid"
 import { supabase } from "@/lib/supabase"
-import { useRouter } from "next/navigation"
 
 type AuthUser = {
   id: string
-  email: string
-  name?: string
-  isAdmin: boolean
+  isAnonymous: boolean
 }
 
 interface AuthContextType {
-  user: AuthUser | null
+  user: AuthUser
   loading: boolean
-  signIn: (email: string, password: string) => Promise<{ error: string | null }>
-  signUp: (email: string, password: string, name: string) => Promise<{ error: string | null }>
-  signOut: () => Promise<void>
-  createUserAccount: (email: string, password: string, name: string) => Promise<{ error: string | null }>
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
@@ -25,186 +19,89 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
-  const router = useRouter()
-
-  // Verificar se um usuário é administrador
-  const checkAdminStatus = async (userId: string): Promise<boolean> => {
-    try {
-      const { data, error } = await supabase.from("admin_users").select("*").eq("id", userId).single()
-
-      if (error || !data) {
-        return false
-      }
-
-      return true
-    } catch (error) {
-      console.error("Erro ao verificar status de admin:", error)
-      return false
-    }
-  }
-
-  // Obter dados do usuário
-  const getUserData = async (userId: string): Promise<{ name?: string } | null> => {
-    try {
-      const { data, error } = await supabase.from("app_users").select("name").eq("id", userId).single()
-
-      if (error) {
-        console.error("Erro ao buscar dados do usuário:", error)
-        return null
-      }
-
-      return data || null
-    } catch (error) {
-      console.error("Erro ao buscar dados do usuário:", error)
-      return null
-    }
-  }
 
   useEffect(() => {
-    // Verificar sessão atual
-    const checkSession = async () => {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession()
+    const initializeUser = async () => {
+      try {
+        // Check if we have a session
+        const { data: sessionData } = await supabase.auth.getSession()
 
-      if (session) {
-        const { user: authUser } = session
-
-        if (authUser) {
-          const isAdminUser = await checkAdminStatus(authUser.id)
-          const userData = await getUserData(authUser.id)
-
+        if (sessionData.session) {
+          // We have a session, use the authenticated user
           setUser({
-            id: authUser.id,
-            email: authUser.email || "",
-            name: userData?.name,
-            isAdmin: isAdminUser,
+            id: sessionData.session.user.id,
+            isAnonymous: false,
+          })
+          setLoading(false)
+          return
+        }
+
+        // No session, check for stored anonymous ID
+        const storedId = localStorage.getItem("anonymousUserId")
+
+        if (storedId) {
+          // We have a stored ID, sign in anonymously with it
+          const { data, error } = await supabase.auth.signInWithPassword({
+            email: `${storedId}@anonymous.user`,
+            password: storedId,
+          })
+
+          if (!error && data.user) {
+            setUser({
+              id: data.user.id,
+              isAnonymous: true,
+            })
+            setLoading(false)
+            return
+          }
+        }
+
+        // No stored ID or sign-in failed, create a new anonymous user
+        const newId = uuidv4()
+
+        // Create anonymous user in Supabase
+        const { data, error } = await supabase.auth.signUp({
+          email: `${newId}@anonymous.user`,
+          password: newId,
+        })
+
+        if (error) {
+          console.error("Error creating anonymous user:", error)
+          // Fallback to local-only
+          localStorage.setItem("anonymousUserId", newId)
+          setUser({
+            id: newId,
+            isAnonymous: true,
+          })
+        } else if (data.user) {
+          localStorage.setItem("anonymousUserId", newId)
+          setUser({
+            id: data.user.id,
+            isAnonymous: true,
           })
         }
+      } catch (error) {
+        console.error("Auth initialization error:", error)
+        // Fallback to local ID
+        const fallbackId = localStorage.getItem("anonymousUserId") || uuidv4()
+        localStorage.setItem("anonymousUserId", fallbackId)
+        setUser({
+          id: fallbackId,
+          isAnonymous: true,
+        })
+      } finally {
+        setLoading(false)
       }
-
-      setLoading(false)
     }
 
-    checkSession()
+    initializeUser()
+  }, [])
 
-    // Configurar listener para mudanças de autenticação
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === "SIGNED_IN" && session) {
-        const { user: authUser } = session
-
-        if (authUser) {
-          const isAdminUser = await checkAdminStatus(authUser.id)
-          const userData = await getUserData(authUser.id)
-
-          setUser({
-            id: authUser.id,
-            email: authUser.email || "",
-            name: userData?.name,
-            isAdmin: isAdminUser,
-          })
-        }
-      } else if (event === "SIGNED_OUT") {
-        setUser(null)
-        router.push("/login")
-      }
-    })
-
-    return () => {
-      subscription.unsubscribe()
-    }
-  }, [router])
-
-  const signIn = async (email: string, password: string) => {
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      })
-
-      if (error) throw error
-
-      return { error: null }
-    } catch (error: any) {
-      return { error: error.message || "Erro ao fazer login" }
-    }
+  if (loading || !user) {
+    return <div className="flex items-center justify-center h-screen">Carregando...</div>
   }
 
-  const signUp = async (email: string, password: string, name: string) => {
-    try {
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-      })
-
-      if (error) throw error
-
-      if (data.user) {
-        // Inserir na tabela app_users
-        const { error: userError } = await supabase.from("app_users").insert([
-          {
-            id: data.user.id,
-            email,
-            name,
-          },
-        ])
-
-        if (userError) throw userError
-      }
-
-      return { error: null }
-    } catch (error: any) {
-      return { error: error.message || "Erro ao criar conta" }
-    }
-  }
-
-  const signOut = async () => {
-    await supabase.auth.signOut()
-    setUser(null)
-  }
-
-  // Função para administradores criarem contas de usuário
-  const createUserAccount = async (email: string, password: string, name: string) => {
-    if (!user?.isAdmin) {
-      return { error: "Apenas administradores podem criar contas" }
-    }
-
-    try {
-      // Criar usuário no Auth
-      const { data, error } = await supabase.auth.admin.createUser({
-        email,
-        password,
-        email_confirm: true,
-      })
-
-      if (error) throw error
-
-      if (data.user) {
-        // Inserir na tabela app_users
-        const { error: userError } = await supabase.from("app_users").insert([
-          {
-            id: data.user.id,
-            email,
-            name,
-          },
-        ])
-
-        if (userError) throw userError
-      }
-
-      return { error: null }
-    } catch (error: any) {
-      return { error: error.message || "Erro ao criar conta de usuário" }
-    }
-  }
-
-  return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut, createUserAccount }}>
-      {children}
-    </AuthContext.Provider>
-  )
+  return <AuthContext.Provider value={{ user, loading }}>{children}</AuthContext.Provider>
 }
 
 export function useAuth() {

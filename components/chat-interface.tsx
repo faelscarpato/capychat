@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react"
 import { useChat } from "@/contexts/chat-context"
 import { usePersonality } from "@/contexts/personality-context"
+import { useTheme } from "@/contexts/theme-context"
 import ChatInput from "./chat-input"
 import ChatMessage from "./chat-message"
 import { ExportChat } from "./export-chat"
@@ -12,8 +13,9 @@ import { Button } from "@/components/ui/button"
 import { useRouter } from "next/navigation"
 
 export default function ChatInterface() {
-  const { activeChat, addMessage, setActiveChat } = useChat()
-  const { personalities, currentPersonality } = usePersonality()
+  const { activeChat, addMessage, setActiveChat, loading: chatLoading } = useChat()
+  const { personalities, currentPersonality, loading: personalityLoading } = usePersonality()
+  const { getThemeClass } = useTheme()
   const [isLoading, setIsLoading] = useState(false)
   const [input, setInput] = useState("")
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
@@ -29,7 +31,7 @@ export default function ChatInterface() {
     if (!activeChat || !content.trim() || isLoading) return
 
     // Adicionar mensagem do usuário
-    addMessage(activeChat.id, {
+    await addMessage(activeChat.id, {
       role: "user",
       content,
     })
@@ -44,7 +46,7 @@ export default function ChatInterface() {
       setStreamingContent("")
 
       // Adicionar mensagem vazia da IA que será preenchida com streaming
-      addMessage(activeChat.id, {
+      await addMessage(activeChat.id, {
         id: tempMessageId,
         role: "assistant",
         content: "",
@@ -93,7 +95,7 @@ export default function ChatInterface() {
               setStreamingContent(accumulatedContent)
 
               // Atualizar a mensagem no contexto
-              addMessage(activeChat.id, {
+              await addMessage(activeChat.id, {
                 id: tempMessageId,
                 role: "assistant",
                 content: accumulatedContent,
@@ -114,7 +116,7 @@ export default function ChatInterface() {
 
       // Adicionar mensagem de erro se não houver mensagem de streaming
       if (!streamingMessageId) {
-        addMessage(activeChat.id, {
+        await addMessage(activeChat.id, {
           role: "assistant",
           content: "Desculpe, encontrei um erro. Por favor, tente novamente.",
         })
@@ -134,6 +136,14 @@ export default function ChatInterface() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [activeChat?.messages, streamingContent])
+
+  if (chatLoading || personalityLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <Loader2 className="h-8 w-8 animate-spin" />
+      </div>
+    )
+  }
 
   if (!activeChat || !personality) {
     return (

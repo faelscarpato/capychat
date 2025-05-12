@@ -3,9 +3,8 @@
 import { useState } from "react"
 import { useChat } from "@/contexts/chat-context"
 import { usePersonality } from "@/contexts/personality-context"
-import { useAuth } from "@/contexts/auth-context"
 import { Button } from "@/components/ui/button"
-import { PlusCircle, Trash2, Settings, LogOut, Home, User } from "lucide-react"
+import { PlusCircle, Trash2, Settings, Home } from "lucide-react"
 import {
   Sidebar as SidebarComponent,
   SidebarContent,
@@ -20,6 +19,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { PersonalityCreator } from "./personality-creator"
 import { ThemeToggle } from "./theme-toggle"
+import { ThemeSelector } from "./theme-selector"
 import { formatDistanceToNow } from "date-fns"
 import { ptBR } from "date-fns/locale"
 import { useRouter } from "next/navigation"
@@ -27,7 +27,6 @@ import { useRouter } from "next/navigation"
 export function Sidebar() {
   const { chats, activeChat, setActiveChat, createChat, deleteChat } = useChat()
   const { personalities, currentPersonality, setCurrentPersonality } = usePersonality()
-  const { user, signOut } = useAuth()
   const [showPersonalityCreator, setShowPersonalityCreator] = useState(false)
   const router = useRouter()
 
@@ -52,6 +51,7 @@ export function Sidebar() {
           <div className="flex items-center justify-between">
             <h1 className="text-xl font-bold">Chatbot IA</h1>
             <div className="flex items-center gap-1">
+              <ThemeSelector />
               <ThemeToggle />
               <SidebarTrigger />
             </div>
@@ -68,16 +68,7 @@ export function Sidebar() {
           </div>
         </SidebarHeader>
 
-        <SidebarContent>
-          {user && (
-            <div className="px-3 py-2 mb-2">
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <User size={14} />
-                <span className="truncate">{user.name || user.email}</span>
-              </div>
-            </div>
-          )}
-
+        <SidebarContent className="overflow-y-auto">
           {chats.length > 0 ? (
             <SidebarMenu>
               {chats.map((chat) => {
@@ -132,11 +123,6 @@ export function Sidebar() {
               <PersonalityCreator onClose={() => setShowPersonalityCreator(false)} />
             </DialogContent>
           </Dialog>
-
-          <Button variant="ghost" className="w-full gap-2" onClick={signOut}>
-            <LogOut size={16} />
-            Sair
-          </Button>
         </SidebarFooter>
 
         <SidebarRail />

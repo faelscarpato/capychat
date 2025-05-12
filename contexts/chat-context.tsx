@@ -30,90 +30,119 @@ interface ChatContextType {
   setActiveChat: (chatId: string | null) => void
   addMessage: (chatId: string, message: Omit<Message, "id" | "createdAt">) => Promise<void>
   clearChats: () => Promise<void>
+  loading: boolean
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined)
 
 export function ChatProvider({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
   const [chats, setChats] = useState<Chat[]>([])
   const [activeChat, setActiveChatState] = useState<Chat | null>(null)
-  const { user } = useAuth()
+  const [loading, setLoading] = useState(true)
 
-  // Carregar chats do Supabase
+  // Load chats from Supabase
   useEffect(() => {
     const loadChats = async () => {
       if (!user) return
 
       try {
-        const { data, error } = await supabase
+        setLoading(true)
+
+        // Get all chats for this user
+        const { data: chatsData, error: chatsError } = await supabase
           .from("chat_conversations")
-          .select("*, chat_messages(*)")
+          .select("*")
           .eq("user_id", user.id)
           .order("updated_at", { ascending: false })
 
-        if (error) {
-          console.error("Erro ao carregar chats:", error)
+        if (chatsError) {
+          console.error("Error loading chats:", chatsError)
           return
         }
 
-        if (data) {
-          const formattedChats = data.map((chat: any) => ({
-            id: chat.id,
-            title: chat.title,
-            personalityId: chat.personality_id,
-            createdAt: new Date(chat.created_at),
-            updatedAt: new Date(chat.updated_at),
-            messages: chat.chat_messages
-              .map((msg: any) => ({
-                id: msg.id,
-                role: msg.role,
-                content: msg.content,
-                createdAt: new Date(msg.created_at),
-              }))
-              .sort((a: any, b: any) => a.createdAt.getTime() - b.createdAt.getTime()),
-          }))
+        if (!chatsData || chatsData.length === 0) {
+          setChats([])
+          setLoading(false)
+          return
+        }
 
-          setChats(formattedChats)
+        // Get all messages for these chats
+        const chatIds = chatsData.map((chat) => chat.id)
+        const { data: messagesData, error: messagesError } = await supabase
+          .from("chat_messages")
+          .select("*")
+          .in("chat_id", chatIds)
+          .order("created_at", { ascending: true })
 
-          // Restaurar chat ativo do localStorage
-          const activeId = localStorage.getItem("activeChat")
-          if (activeId) {
-            const active = formattedChats.find((c: Chat) => c.id === activeId)
-            if (active) {
-              setActiveChatState(active)
-            }
+        if (messagesError) {
+          console.error("Error loading messages:", messagesError)
+          return
+        }
+
+        // Group messages by chat_id
+        const messagesByChatId: Record<string, any[]> = {}
+        messagesData?.forEach((message) => {
+          if (!messagesByChatId[message.chat_id]) {
+            messagesByChatId[message.chat_id] = []
+          }
+          messagesByChatId[message.chat_id].push(message)
+        })
+
+        // Format chats with their messages
+        const formattedChats = chatsData.map((chat) => ({
+          id: chat.id,
+          title: chat.title,
+          personalityId: chat.personality_id,
+          createdAt: new Date(chat.created_at),
+          updatedAt: new Date(chat.updated_at),
+          messages: (messagesByChatId[chat.id] || []).map((msg) => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            createdAt: new Date(msg.created_at),
+          })),
+        }))
+
+        setChats(formattedChats)
+
+        // Restore active chat from localStorage
+        const activeId = localStorage.getItem(`activeChat_${user.id}`)
+        if (activeId) {
+          const active = formattedChats.find((c) => c.id === activeId)
+          if (active) {
+            setActiveChatState(active)
           }
         }
       } catch (error) {
-        console.error("Erro ao carregar chats:", error)
+        console.error("Error loading chats:", error)
+      } finally {
+        setLoading(false)
       }
     }
 
     if (user) {
       loadChats()
-    } else {
-      setChats([])
-      setActiveChatState(null)
     }
   }, [user])
 
-  // Salvar chat ativo no localStorage
+  // Save active chat to localStorage
   useEffect(() => {
-    if (activeChat) {
-      localStorage.setItem("activeChat", activeChat.id)
-    } else {
-      localStorage.removeItem("activeChat")
+    if (user && activeChat) {
+      localStorage.setItem(`activeChat_${user.id}`, activeChat.id)
+    } else if (user) {
+      localStorage.removeItem(`activeChat_${user.id}`)
     }
-  }, [activeChat])
+  }, [activeChat, user])
 
   const createChat = async (personalityId: string, firstMessage?: string) => {
-    if (!user) throw new Error("Usuário não autenticado")
+    if (!user) throw new Error("User not authenticated")
 
     const newChatId = uuidv4()
     const now = new Date()
 
     try {
-      // Criar chat no Supabase
+      // Create chat in Supabase
       const { error: chatError } = await supabase.from("chat_conversations").insert([
         {
           id: newChatId,
@@ -129,7 +158,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
       const initialMessages: Message[] = []
 
-      // Se houver primeira mensagem, adicionar ao chat
+      // Add first message if provided
       if (firstMessage) {
         const messageId = uuidv4()
 
@@ -166,13 +195,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setActiveChatState(newChat)
       return newChatId
     } catch (error) {
-      console.error("Erro ao criar chat:", error)
+      console.error("Error creating chat:", error)
       throw error
     }
   }
 
   const updateChatTitle = async (chatId: string, title: string) => {
-    if (!user) throw new Error("Usuário não autenticado")
+    if (!user) throw new Error("User not authenticated")
 
     try {
       const { error } = await supabase
@@ -199,21 +228,21 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         setActiveChatState((prev) => (prev ? { ...prev, title } : null))
       }
     } catch (error) {
-      console.error("Erro ao atualizar título do chat:", error)
+      console.error("Error updating chat title:", error)
       throw error
     }
   }
 
   const deleteChat = async (chatId: string) => {
-    if (!user) throw new Error("Usuário não autenticado")
+    if (!user) throw new Error("User not authenticated")
 
     try {
-      // Primeiro excluir todas as mensagens do chat
+      // Delete messages first
       const { error: msgError } = await supabase.from("chat_messages").delete().eq("chat_id", chatId)
 
       if (msgError) throw msgError
 
-      // Depois excluir o chat
+      // Then delete the chat
       const { error: chatError } = await supabase
         .from("chat_conversations")
         .delete()
@@ -228,7 +257,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         setActiveChatState(null)
       }
     } catch (error) {
-      console.error("Erro ao excluir chat:", error)
+      console.error("Error deleting chat:", error)
       throw error
     }
   }
@@ -244,13 +273,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   }
 
   const addMessage = async (chatId: string, message: Omit<Message, "id" | "createdAt">) => {
-    if (!user) throw new Error("Usuário não autenticado")
+    if (!user) throw new Error("User not authenticated")
 
     const messageId = uuidv4()
     const now = new Date()
 
     try {
-      // Adicionar mensagem no Supabase
+      // Add message to Supabase
       const { error: msgError } = await supabase.from("chat_messages").insert([
         {
           id: messageId,
@@ -263,7 +292,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
       if (msgError) throw msgError
 
-      // Atualizar timestamp do chat
+      // Update chat timestamp
       const { error: chatError } = await supabase
         .from("chat_conversations")
         .update({ updated_at: now.toISOString() })
@@ -281,19 +310,19 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setChats((prev) =>
         prev.map((chat) => {
           if (chat.id === chatId) {
-            // Se for a primeira mensagem do usuário, gerar um título
+            // Generate title from first user message if needed
             let title = chat.title
             if (chat.messages.length === 0 && message.role === "user") {
               title = generateTitle(message.content)
 
-              // Atualizar título no Supabase
+              // Update title in Supabase
               supabase
                 .from("chat_conversations")
                 .update({ title })
                 .eq("id", chatId)
                 .eq("user_id", user.id)
                 .then()
-                .catch((err) => console.error("Erro ao atualizar título:", err))
+                .catch((err) => console.error("Error updating title:", err))
             }
 
             return {
@@ -307,12 +336,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         }),
       )
 
-      // Atualizar o chat ativo se for o mesmo
+      // Update active chat if it's the same
       if (activeChat?.id === chatId) {
         setActiveChatState((prev) => {
           if (!prev) return null
 
-          // Se for a primeira mensagem do usuário, gerar um título
+          // Generate title from first user message if needed
           let title = prev.title
           if (prev.messages.length === 0 && message.role === "user") {
             title = generateTitle(message.content)
@@ -327,27 +356,24 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         })
       }
     } catch (error) {
-      console.error("Erro ao adicionar mensagem:", error)
+      console.error("Error adding message:", error)
       throw error
     }
   }
 
   const clearChats = async () => {
-    if (!user) throw new Error("Usuário não autenticado")
+    if (!user) throw new Error("User not authenticated")
 
     try {
-      // Primeiro excluir todas as mensagens
-      const { error: msgError } = await supabase
-        .from("chat_messages")
-        .delete()
-        .in(
-          "chat_id",
-          chats.map((c) => c.id),
-        )
+      // Delete all messages for this user's chats
+      const chatIds = chats.map((c) => c.id)
+      if (chatIds.length > 0) {
+        const { error: msgError } = await supabase.from("chat_messages").delete().in("chat_id", chatIds)
 
-      if (msgError) throw msgError
+        if (msgError) throw msgError
+      }
 
-      // Depois excluir todos os chats
+      // Delete all chats
       const { error: chatError } = await supabase.from("chat_conversations").delete().eq("user_id", user.id)
 
       if (chatError) throw chatError
@@ -355,14 +381,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setChats([])
       setActiveChatState(null)
     } catch (error) {
-      console.error("Erro ao limpar chats:", error)
+      console.error("Error clearing chats:", error)
       throw error
     }
   }
 
-  // Função para gerar um título baseado na primeira mensagem
+  // Generate title from first message
   const generateTitle = (message: string) => {
-    // Limitar a 30 caracteres e adicionar "..." se for maior
     return message.length > 30 ? `${message.substring(0, 30)}...` : message
   }
 
@@ -377,6 +402,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         setActiveChat,
         addMessage,
         clearChats,
+        loading,
       }}
     >
       {children}
@@ -387,7 +413,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 export function useChat() {
   const context = useContext(ChatContext)
   if (context === undefined) {
-    throw new Error("useChat deve ser usado dentro de um ChatProvider")
+    throw new Error("useChat must be used within a ChatProvider")
   }
   return context
 }
