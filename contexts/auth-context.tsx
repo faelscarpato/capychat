@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react"
 import { v4 as uuidv4 } from "uuid"
-import { supabase } from "@/lib/supabase"
+import { initializeDatabase } from "@/lib/db-init"
 
 type AuthUser = {
   id: string
@@ -23,63 +23,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const initializeUser = async () => {
       try {
-        // Check if we have a session
-        const { data: sessionData } = await supabase.auth.getSession()
+        // Initialize database tables
+        await initializeDatabase()
 
-        if (sessionData.session) {
-          // We have a session, use the authenticated user
+        // Check if we have a stored anonymous ID
+        const storedId = localStorage.getItem("anonymousUserId")
+
+        if (storedId) {
+          // We have a stored ID, use it
           setUser({
-            id: sessionData.session.user.id,
-            isAnonymous: false,
+            id: storedId,
+            isAnonymous: true,
           })
           setLoading(false)
           return
         }
 
-        // No session, check for stored anonymous ID
-        const storedId = localStorage.getItem("anonymousUserId")
-
-        if (storedId) {
-          // We have a stored ID, sign in anonymously with it
-          const { data, error } = await supabase.auth.signInWithPassword({
-            email: `${storedId}@anonymous.user`,
-            password: storedId,
-          })
-
-          if (!error && data.user) {
-            setUser({
-              id: data.user.id,
-              isAnonymous: true,
-            })
-            setLoading(false)
-            return
-          }
-        }
-
-        // No stored ID or sign-in failed, create a new anonymous user
+        // No stored ID, create a new anonymous user
         const newId = uuidv4()
-
-        // Create anonymous user in Supabase
-        const { data, error } = await supabase.auth.signUp({
-          email: `${newId}@anonymous.user`,
-          password: newId,
+        localStorage.setItem("anonymousUserId", newId)
+        setUser({
+          id: newId,
+          isAnonymous: true,
         })
-
-        if (error) {
-          console.error("Error creating anonymous user:", error)
-          // Fallback to local-only
-          localStorage.setItem("anonymousUserId", newId)
-          setUser({
-            id: newId,
-            isAnonymous: true,
-          })
-        } else if (data.user) {
-          localStorage.setItem("anonymousUserId", newId)
-          setUser({
-            id: data.user.id,
-            isAnonymous: true,
-          })
-        }
       } catch (error) {
         console.error("Auth initialization error:", error)
         // Fallback to local ID

@@ -4,6 +4,7 @@ import { createContext, useContext, useState, useEffect, type ReactNode } from "
 import { v4 as uuidv4 } from "uuid"
 import { supabase } from "@/lib/supabase"
 import { useAuth } from "./auth-context"
+import { initializeDatabase } from "@/lib/db-init"
 
 export interface Personality {
   id: string
@@ -107,36 +108,76 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
   const [personalities, setPersonalities] = useState<Personality[]>(defaultPersonalities)
   const [currentPersonality, setCurrentPersonalityState] = useState<Personality | null>(null)
   const [loading, setLoading] = useState(true)
+  const [dbInitialized, setDbInitialized] = useState(false)
+
+  // Initialize database tables if needed
+  useEffect(() => {
+    const init = async () => {
+      if (user && !dbInitialized) {
+        const initialized = await initializeDatabase()
+        setDbInitialized(initialized)
+      }
+    }
+
+    init()
+  }, [user, dbInitialized])
 
   // Load custom personalities from Supabase
   useEffect(() => {
     const loadPersonalities = async () => {
-      if (!user) return
+      if (!user || !dbInitialized) return
 
       try {
         setLoading(true)
-        const { data, error } = await supabase.from("custom_personalities").select("*").eq("user_id", user.id)
 
-        if (error) {
-          console.error("Error loading personalities:", error)
-          return
+        // Try to load custom personalities
+        try {
+          const { data, error } = await supabase.from("custom_personalities").select("*").eq("user_id", user.id)
+
+          if (error) {
+            // If it's not the "relation does not exist" error, log it
+            if (!error.message.includes("relation") || !error.message.includes("does not exist")) {
+              console.error("Error loading personalities:", error)
+            }
+          } else if (data && data.length > 0) {
+            const customPersonalities = data.map((p: any) => ({
+              id: p.id,
+              name: p.name,
+              description: p.description,
+              systemPrompt: p.system_prompt,
+              avatar: p.avatar,
+              color: p.color,
+              isCustom: true,
+            }))
+
+            setPersonalities([...defaultPersonalities, ...customPersonalities])
+          }
+        } catch (error) {
+          console.error("Error in personality loading:", error)
         }
 
-        if (data && data.length > 0) {
-          const customPersonalities = data.map((p: any) => ({
-            id: p.id,
-            name: p.name,
-            description: p.description,
-            systemPrompt: p.system_prompt,
-            avatar: p.avatar,
-            color: p.color,
-            isCustom: true,
-          }))
-
-          setPersonalities([...defaultPersonalities, ...customPersonalities])
+        // Try to load current personality from localStorage
+        try {
+          const storedPersonalityId = localStorage.getItem(`currentPersonality_${user.id}`)
+          if (storedPersonalityId) {
+            const personality = personalities.find((p) => p.id === storedPersonalityId)
+            if (personality) {
+              setCurrentPersonalityState(personality)
+            } else {
+              // If personality not found, set the first default one
+              setCurrentPersonalityState(defaultPersonalities[0])
+            }
+          } else {
+            // If no stored personality, set the first default one
+            setCurrentPersonalityState(defaultPersonalities[0])
+          }
+        } catch (error) {
+          console.error("Error loading current personality:", error)
+          // Set default personality
+          setCurrentPersonalityState(defaultPersonalities[0])
         }
       } catch (error) {
-        console.error("Error loading personalities:", error)
+        console.error("Error in personality context:", error)
       } finally {
         setLoading(false)
       }
@@ -145,10 +186,10 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
     if (user) {
       loadPersonalities()
     }
-  }, [user])
+  }, [user, dbInitialized, personalities])
 
   const setCurrentPersonality = (personalityId: string) => {
-    const personality = personalities.find((p) => p.id === personalityId) || null
+    const personality = personalities.find((p) => p.id === personalityId) || defaultPersonalities[0]
     setCurrentPersonalityState(personality)
 
     // Save to localStorage as backup
@@ -163,6 +204,12 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
     const newPersonalityId = uuidv4()
 
     try {
+      // Ensure database is initialized
+      if (!dbInitialized) {
+        await initializeDatabase()
+        setDbInitialized(true)
+      }
+
       const { error } = await supabase.from("custom_personalities").insert([
         {
           id: newPersonalityId,
@@ -175,7 +222,17 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
         },
       ])
 
-      if (error) throw error
+      if (error) {
+        console.error("Error adding personality:", error)
+        // Fall back to local storage if database fails
+        const localPersonalities = JSON.parse(localStorage.getItem(`personalities_${user.id}`) || "[]")
+        localPersonalities.push({
+          ...personality,
+          id: newPersonalityId,
+          isCustom: true,
+        })
+        localStorage.setItem(`personalities_${user.id}`, JSON.stringify(localPersonalities))
+      }
 
       const newPersonality = {
         ...personality,
@@ -196,6 +253,12 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
     if (!personality.isCustom) throw new Error("Cannot edit default personalities")
 
     try {
+      // Ensure database is initialized
+      if (!dbInitialized) {
+        await initializeDatabase()
+        setDbInitialized(true)
+      }
+
       const { error } = await supabase
         .from("custom_personalities")
         .update({
@@ -208,7 +271,15 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
         .eq("id", personality.id)
         .eq("user_id", user.id)
 
-      if (error) throw error
+      if (error) {
+        console.error("Error updating personality:", error)
+        // Fall back to local storage if database fails
+        const localPersonalities = JSON.parse(localStorage.getItem(`personalities_${user.id}`) || "[]")
+        const updatedLocalPersonalities = localPersonalities.map((p: any) =>
+          p.id === personality.id ? { ...personality } : p,
+        )
+        localStorage.setItem(`personalities_${user.id}`, JSON.stringify(updatedLocalPersonalities))
+      }
 
       setPersonalities((prev) => prev.map((p) => (p.id === personality.id ? personality : p)))
     } catch (error) {
@@ -224,19 +295,32 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
     if (!personality?.isCustom) throw new Error("Cannot delete default personalities")
 
     try {
+      // Ensure database is initialized
+      if (!dbInitialized) {
+        await initializeDatabase()
+        setDbInitialized(true)
+      }
+
       const { error } = await supabase
         .from("custom_personalities")
         .delete()
         .eq("id", personalityId)
         .eq("user_id", user.id)
 
-      if (error) throw error
+      if (error) {
+        console.error("Error deleting personality:", error)
+        // Fall back to local storage if database fails
+        const localPersonalities = JSON.parse(localStorage.getItem(`personalities_${user.id}`) || "[]")
+        const filteredLocalPersonalities = localPersonalities.filter((p: any) => p.id !== personalityId)
+        localStorage.setItem(`personalities_${user.id}`, JSON.stringify(filteredLocalPersonalities))
+      }
 
       setPersonalities((prev) => prev.filter((p) => p.id !== personalityId))
 
       // If current personality is deleted, reset it
       if (currentPersonality?.id === personalityId) {
-        setCurrentPersonalityState(null)
+        setCurrentPersonalityState(defaultPersonalities[0])
+        localStorage.setItem(`currentPersonality_${user.id}`, defaultPersonalities[0].id)
       }
     } catch (error) {
       console.error("Error deleting personality:", error)
@@ -248,7 +332,7 @@ export function PersonalityProvider({ children }: { children: ReactNode }) {
     <PersonalityContext.Provider
       value={{
         personalities,
-        currentPersonality,
+        currentPersonality: currentPersonality || defaultPersonalities[0],
         setCurrentPersonality,
         addPersonality,
         updatePersonality,

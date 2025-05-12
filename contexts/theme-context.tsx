@@ -3,6 +3,7 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react"
 import { useAuth } from "./auth-context"
 import { supabase } from "@/lib/supabase"
+import { initializeDatabase } from "@/lib/db-init"
 
 type ThemeColor = "blue" | "purple" | "green" | "red" | "amber" | "pink" | "indigo" | "teal" | "orange" | "slate"
 
@@ -90,21 +91,51 @@ const themeClasses: Record<ThemeColor, Record<string, string>> = {
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   const [themeColor, setThemeColorState] = useState<ThemeColor>("blue")
+  const [dbInitialized, setDbInitialized] = useState(false)
+
+  // Initialize database tables if needed
+  useEffect(() => {
+    const init = async () => {
+      if (user && !dbInitialized) {
+        const initialized = await initializeDatabase()
+        setDbInitialized(initialized)
+      }
+    }
+
+    init()
+  }, [user, dbInitialized])
 
   // Load theme from Supabase or localStorage
   useEffect(() => {
     const loadTheme = async () => {
+      if (!user) return
+
       try {
         // Try to load from Supabase first
-        const { data, error } = await supabase
-          .from("user_preferences")
-          .select("theme_color")
-          .eq("user_id", user.id)
-          .single()
+        try {
+          const { data, error } = await supabase
+            .from("user_preferences")
+            .select("theme_color")
+            .eq("user_id", user.id)
+            .single()
 
-        if (data && !error) {
-          setThemeColorState(data.theme_color as ThemeColor)
-        } else {
+          if (error) {
+            // If it's not the "relation does not exist" error, log it
+            if (!error.message.includes("relation") || !error.message.includes("does not exist")) {
+              console.error("Error loading theme:", error)
+            }
+
+            // Fall back to localStorage
+            const storedTheme = localStorage.getItem(`theme_color_${user.id}`)
+            if (storedTheme && Object.keys(themeClasses).includes(storedTheme)) {
+              setThemeColorState(storedTheme as ThemeColor)
+            }
+          } else if (data && data.theme_color) {
+            setThemeColorState(data.theme_color as ThemeColor)
+          }
+        } catch (error) {
+          console.error("Error loading theme from database:", error)
+
           // Fall back to localStorage
           const storedTheme = localStorage.getItem(`theme_color_${user.id}`)
           if (storedTheme && Object.keys(themeClasses).includes(storedTheme)) {
@@ -119,24 +150,73 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (user) {
       loadTheme()
     }
-  }, [user])
+  }, [user, dbInitialized])
 
   const setThemeColor = async (color: ThemeColor) => {
+    if (!user) return
+
     setThemeColorState(color)
 
     // Save to localStorage as backup
     localStorage.setItem(`theme_color_${user.id}`, color)
 
     try {
-      // Check if user preference exists
-      const { data, error } = await supabase.from("user_preferences").select("id").eq("user_id", user.id).single()
+      // Ensure database is initialized
+      if (!dbInitialized) {
+        await initializeDatabase()
+        setDbInitialized(true)
+      }
 
-      if (data && !error) {
-        // Update existing preference
-        await supabase.from("user_preferences").update({ theme_color: color }).eq("user_id", user.id)
-      } else {
-        // Create new preference
-        await supabase.from("user_preferences").insert([{ user_id: user.id, theme_color: color }])
+      // Try to save to Supabase
+      try {
+        // Check if user preference exists
+        const { data, error } = await supabase.from("user_preferences").select("id").eq("user_id", user.id).single()
+
+        if (error) {
+          // If it's not the "relation does not exist" error, log it
+          if (!error.message.includes("relation") || !error.message.includes("does not exist")) {
+            console.error("Error checking user preferences:", error)
+          }
+
+          // Try to create new preference
+          const { error: insertError } = await supabase
+            .from("user_preferences")
+            .insert([{ user_id: user.id, theme_color: color }])
+
+          if (
+            insertError &&
+            (!insertError.message.includes("relation") || !insertError.message.includes("does not exist"))
+          ) {
+            console.error("Error creating user preference:", insertError)
+          }
+        } else if (data) {
+          // Update existing preference
+          const { error: updateError } = await supabase
+            .from("user_preferences")
+            .update({ theme_color: color })
+            .eq("user_id", user.id)
+
+          if (
+            updateError &&
+            (!updateError.message.includes("relation") || !updateError.message.includes("does not exist"))
+          ) {
+            console.error("Error updating user preference:", updateError)
+          }
+        } else {
+          // Create new preference
+          const { error: insertError } = await supabase
+            .from("user_preferences")
+            .insert([{ user_id: user.id, theme_color: color }])
+
+          if (
+            insertError &&
+            (!insertError.message.includes("relation") || !insertError.message.includes("does not exist"))
+          ) {
+            console.error("Error creating user preference:", insertError)
+          }
+        }
+      } catch (error) {
+        console.error("Error saving theme to database:", error)
       }
     } catch (error) {
       console.error("Error saving theme:", error)

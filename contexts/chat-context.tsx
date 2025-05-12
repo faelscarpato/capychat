@@ -4,6 +4,7 @@ import { createContext, useContext, useState, useEffect, type ReactNode } from "
 import { v4 as uuidv4 } from "uuid"
 import { supabase } from "@/lib/supabase"
 import { useAuth } from "./auth-context"
+import { initializeDatabase } from "@/lib/db-init"
 
 export interface Message {
   id: string
@@ -40,82 +41,149 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [chats, setChats] = useState<Chat[]>([])
   const [activeChat, setActiveChatState] = useState<Chat | null>(null)
   const [loading, setLoading] = useState(true)
+  const [dbInitialized, setDbInitialized] = useState(false)
+
+  // Initialize database tables if needed
+  useEffect(() => {
+    const init = async () => {
+      if (user && !dbInitialized) {
+        const initialized = await initializeDatabase()
+        setDbInitialized(initialized)
+      }
+    }
+
+    init()
+  }, [user, dbInitialized])
 
   // Load chats from Supabase
   useEffect(() => {
     const loadChats = async () => {
-      if (!user) return
+      if (!user || !dbInitialized) return
 
       try {
         setLoading(true)
 
-        // Get all chats for this user
-        const { data: chatsData, error: chatsError } = await supabase
-          .from("chat_conversations")
-          .select("*")
-          .eq("user_id", user.id)
-          .order("updated_at", { ascending: false })
+        // Try to load chats from Supabase
+        try {
+          // Get all chats for this user
+          const { data: chatsData, error: chatsError } = await supabase
+            .from("chat_conversations")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("updated_at", { ascending: false })
 
-        if (chatsError) {
-          console.error("Error loading chats:", chatsError)
-          return
-        }
+          if (chatsError) {
+            // If it's not the "relation does not exist" error, log it
+            if (!chatsError.message.includes("relation") || !chatsError.message.includes("does not exist")) {
+              console.error("Error loading chats:", chatsError)
+            }
 
-        if (!chatsData || chatsData.length === 0) {
-          setChats([])
-          setLoading(false)
-          return
-        }
+            // Fall back to localStorage
+            const storedChats = localStorage.getItem(`chats_${user.id}`)
+            if (storedChats) {
+              try {
+                const parsed = JSON.parse(storedChats)
+                const formattedChats = parsed.map((chat: any) => ({
+                  ...chat,
+                  createdAt: new Date(chat.createdAt),
+                  updatedAt: new Date(chat.updatedAt),
+                  messages: chat.messages.map((msg: any) => ({
+                    ...msg,
+                    createdAt: new Date(msg.createdAt),
+                  })),
+                }))
+                setChats(formattedChats)
+              } catch (e) {
+                console.error("Error parsing stored chats:", e)
+                setChats([])
+              }
+            } else {
+              setChats([])
+            }
+          } else if (!chatsData || chatsData.length === 0) {
+            setChats([])
+          } else {
+            // Get all messages for these chats
+            const chatIds = chatsData.map((chat) => chat.id)
+            const { data: messagesData, error: messagesError } = await supabase
+              .from("chat_messages")
+              .select("*")
+              .in("chat_id", chatIds)
+              .order("created_at", { ascending: true })
 
-        // Get all messages for these chats
-        const chatIds = chatsData.map((chat) => chat.id)
-        const { data: messagesData, error: messagesError } = await supabase
-          .from("chat_messages")
-          .select("*")
-          .in("chat_id", chatIds)
-          .order("created_at", { ascending: true })
+            if (
+              messagesError &&
+              (!messagesError.message.includes("relation") || !messagesError.message.includes("does not exist"))
+            ) {
+              console.error("Error loading messages:", messagesError)
+            }
 
-        if (messagesError) {
-          console.error("Error loading messages:", messagesError)
-          return
-        }
+            // Group messages by chat_id
+            const messagesByChatId: Record<string, any[]> = {}
+            messagesData?.forEach((message) => {
+              if (!messagesByChatId[message.chat_id]) {
+                messagesByChatId[message.chat_id] = []
+              }
+              messagesByChatId[message.chat_id].push(message)
+            })
 
-        // Group messages by chat_id
-        const messagesByChatId: Record<string, any[]> = {}
-        messagesData?.forEach((message) => {
-          if (!messagesByChatId[message.chat_id]) {
-            messagesByChatId[message.chat_id] = []
+            // Format chats with their messages
+            const formattedChats = chatsData.map((chat) => ({
+              id: chat.id,
+              title: chat.title,
+              personalityId: chat.personality_id,
+              createdAt: new Date(chat.created_at),
+              updatedAt: new Date(chat.updated_at),
+              messages: (messagesByChatId[chat.id] || []).map((msg) => ({
+                id: msg.id,
+                role: msg.role,
+                content: msg.content,
+                createdAt: new Date(msg.created_at),
+              })),
+            }))
+
+            setChats(formattedChats)
           }
-          messagesByChatId[message.chat_id].push(message)
-        })
-
-        // Format chats with their messages
-        const formattedChats = chatsData.map((chat) => ({
-          id: chat.id,
-          title: chat.title,
-          personalityId: chat.personality_id,
-          createdAt: new Date(chat.created_at),
-          updatedAt: new Date(chat.updated_at),
-          messages: (messagesByChatId[chat.id] || []).map((msg) => ({
-            id: msg.id,
-            role: msg.role,
-            content: msg.content,
-            createdAt: new Date(msg.created_at),
-          })),
-        }))
-
-        setChats(formattedChats)
+        } catch (error) {
+          console.error("Error in chat loading:", error)
+          // Fall back to localStorage
+          const storedChats = localStorage.getItem(`chats_${user.id}`)
+          if (storedChats) {
+            try {
+              const parsed = JSON.parse(storedChats)
+              const formattedChats = parsed.map((chat: any) => ({
+                ...chat,
+                createdAt: new Date(chat.createdAt),
+                updatedAt: new Date(chat.updatedAt),
+                messages: chat.messages.map((msg: any) => ({
+                  ...msg,
+                  createdAt: new Date(msg.createdAt),
+                })),
+              }))
+              setChats(formattedChats)
+            } catch (e) {
+              console.error("Error parsing stored chats:", e)
+              setChats([])
+            }
+          } else {
+            setChats([])
+          }
+        }
 
         // Restore active chat from localStorage
-        const activeId = localStorage.getItem(`activeChat_${user.id}`)
-        if (activeId) {
-          const active = formattedChats.find((c) => c.id === activeId)
-          if (active) {
-            setActiveChatState(active)
+        try {
+          const activeId = localStorage.getItem(`activeChat_${user.id}`)
+          if (activeId) {
+            const active = chats.find((c) => c.id === activeId)
+            if (active) {
+              setActiveChatState(active)
+            }
           }
+        } catch (error) {
+          console.error("Error restoring active chat:", error)
         }
       } catch (error) {
-        console.error("Error loading chats:", error)
+        console.error("Error in chat context:", error)
       } finally {
         setLoading(false)
       }
@@ -124,7 +192,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     if (user) {
       loadChats()
     }
-  }, [user])
+  }, [user, dbInitialized, chats.length])
 
   // Save active chat to localStorage
   useEffect(() => {
@@ -135,45 +203,30 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }
   }, [activeChat, user])
 
+  // Save chats to localStorage as backup
+  useEffect(() => {
+    if (user && chats.length > 0) {
+      localStorage.setItem(`chats_${user.id}`, JSON.stringify(chats))
+    }
+  }, [chats, user])
+
   const createChat = async (personalityId: string, firstMessage?: string) => {
     if (!user) throw new Error("User not authenticated")
 
     const newChatId = uuidv4()
     const now = new Date()
+    const initialMessages: Message[] = []
 
     try {
-      // Create chat in Supabase
-      const { error: chatError } = await supabase.from("chat_conversations").insert([
-        {
-          id: newChatId,
-          title: firstMessage ? generateTitle(firstMessage) : "Nova conversa",
-          personality_id: personalityId,
-          user_id: user.id,
-          created_at: now.toISOString(),
-          updated_at: now.toISOString(),
-        },
-      ])
-
-      if (chatError) throw chatError
-
-      const initialMessages: Message[] = []
+      // Ensure database is initialized
+      if (!dbInitialized) {
+        await initializeDatabase()
+        setDbInitialized(true)
+      }
 
       // Add first message if provided
       if (firstMessage) {
         const messageId = uuidv4()
-
-        const { error: msgError } = await supabase.from("chat_messages").insert([
-          {
-            id: messageId,
-            chat_id: newChatId,
-            role: "user",
-            content: firstMessage,
-            created_at: now.toISOString(),
-          },
-        ])
-
-        if (msgError) throw msgError
-
         initialMessages.push({
           id: messageId,
           role: "user",
@@ -191,6 +244,46 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         updatedAt: now,
       }
 
+      // Try to create chat in Supabase
+      try {
+        // Create chat in Supabase
+        const { error: chatError } = await supabase.from("chat_conversations").insert([
+          {
+            id: newChatId,
+            title: newChat.title,
+            personality_id: personalityId,
+            user_id: user.id,
+            created_at: now.toISOString(),
+            updated_at: now.toISOString(),
+          },
+        ])
+
+        if (chatError && (!chatError.message.includes("relation") || !chatError.message.includes("does not exist"))) {
+          console.error("Error creating chat:", chatError)
+        }
+
+        // Add first message if provided
+        if (firstMessage) {
+          const messageId = initialMessages[0].id
+          const { error: msgError } = await supabase.from("chat_messages").insert([
+            {
+              id: messageId,
+              chat_id: newChatId,
+              role: "user",
+              content: firstMessage,
+              created_at: now.toISOString(),
+            },
+          ])
+
+          if (msgError && (!msgError.message.includes("relation") || !msgError.message.includes("does not exist"))) {
+            console.error("Error adding message:", msgError)
+          }
+        }
+      } catch (error) {
+        console.error("Error creating chat in database:", error)
+      }
+
+      // Update local state
       setChats((prev) => [newChat, ...prev])
       setActiveChatState(newChat)
       return newChatId
@@ -204,17 +297,31 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     if (!user) throw new Error("User not authenticated")
 
     try {
-      const { error } = await supabase
-        .from("chat_conversations")
-        .update({
-          title,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", chatId)
-        .eq("user_id", user.id)
+      // Ensure database is initialized
+      if (!dbInitialized) {
+        await initializeDatabase()
+        setDbInitialized(true)
+      }
 
-      if (error) throw error
+      // Try to update in Supabase
+      try {
+        const { error } = await supabase
+          .from("chat_conversations")
+          .update({
+            title,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", chatId)
+          .eq("user_id", user.id)
 
+        if (error && (!error.message.includes("relation") || !error.message.includes("does not exist"))) {
+          console.error("Error updating chat title:", error)
+        }
+      } catch (error) {
+        console.error("Error updating chat title in database:", error)
+      }
+
+      // Update local state
       setChats((prev) =>
         prev.map((chat) => {
           if (chat.id === chatId) {
@@ -237,20 +344,36 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     if (!user) throw new Error("User not authenticated")
 
     try {
-      // Delete messages first
-      const { error: msgError } = await supabase.from("chat_messages").delete().eq("chat_id", chatId)
+      // Ensure database is initialized
+      if (!dbInitialized) {
+        await initializeDatabase()
+        setDbInitialized(true)
+      }
 
-      if (msgError) throw msgError
+      // Try to delete from Supabase
+      try {
+        // Delete messages first
+        const { error: msgError } = await supabase.from("chat_messages").delete().eq("chat_id", chatId)
 
-      // Then delete the chat
-      const { error: chatError } = await supabase
-        .from("chat_conversations")
-        .delete()
-        .eq("id", chatId)
-        .eq("user_id", user.id)
+        if (msgError && (!msgError.message.includes("relation") || !msgError.message.includes("does not exist"))) {
+          console.error("Error deleting messages:", msgError)
+        }
 
-      if (chatError) throw chatError
+        // Then delete the chat
+        const { error: chatError } = await supabase
+          .from("chat_conversations")
+          .delete()
+          .eq("id", chatId)
+          .eq("user_id", user.id)
 
+        if (chatError && (!chatError.message.includes("relation") || !chatError.message.includes("does not exist"))) {
+          console.error("Error deleting chat:", chatError)
+        }
+      } catch (error) {
+        console.error("Error deleting chat from database:", error)
+      }
+
+      // Update local state
       setChats((prev) => prev.filter((chat) => chat.id !== chatId))
 
       if (activeChat?.id === chatId) {
@@ -275,31 +398,46 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const addMessage = async (chatId: string, message: Omit<Message, "id" | "createdAt">) => {
     if (!user) throw new Error("User not authenticated")
 
-    const messageId = uuidv4()
+    const messageId = message.id || uuidv4()
     const now = new Date()
 
     try {
-      // Add message to Supabase
-      const { error: msgError } = await supabase.from("chat_messages").insert([
-        {
-          id: messageId,
-          chat_id: chatId,
-          role: message.role,
-          content: message.content,
-          created_at: now.toISOString(),
-        },
-      ])
+      // Ensure database is initialized
+      if (!dbInitialized) {
+        await initializeDatabase()
+        setDbInitialized(true)
+      }
 
-      if (msgError) throw msgError
+      // Try to add message to Supabase
+      try {
+        // Add message to Supabase
+        const { error: msgError } = await supabase.from("chat_messages").insert([
+          {
+            id: messageId,
+            chat_id: chatId,
+            role: message.role,
+            content: message.content,
+            created_at: now.toISOString(),
+          },
+        ])
 
-      // Update chat timestamp
-      const { error: chatError } = await supabase
-        .from("chat_conversations")
-        .update({ updated_at: now.toISOString() })
-        .eq("id", chatId)
-        .eq("user_id", user.id)
+        if (msgError && (!msgError.message.includes("relation") || !msgError.message.includes("does not exist"))) {
+          console.error("Error adding message:", msgError)
+        }
 
-      if (chatError) throw chatError
+        // Update chat timestamp
+        const { error: chatError } = await supabase
+          .from("chat_conversations")
+          .update({ updated_at: now.toISOString() })
+          .eq("id", chatId)
+          .eq("user_id", user.id)
+
+        if (chatError && (!chatError.message.includes("relation") || !chatError.message.includes("does not exist"))) {
+          console.error("Error updating chat timestamp:", chatError)
+        }
+      } catch (error) {
+        console.error("Error adding message to database:", error)
+      }
 
       const newMessage: Message = {
         ...message,
@@ -307,6 +445,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         createdAt: now,
       }
 
+      // Update local state
       setChats((prev) =>
         prev.map((chat) => {
           if (chat.id === chatId) {
@@ -315,14 +454,22 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             if (chat.messages.length === 0 && message.role === "user") {
               title = generateTitle(message.content)
 
-              // Update title in Supabase
-              supabase
-                .from("chat_conversations")
-                .update({ title })
-                .eq("id", chatId)
-                .eq("user_id", user.id)
-                .then()
-                .catch((err) => console.error("Error updating title:", err))
+              // Try to update title in Supabase
+              try {
+                supabase
+                  .from("chat_conversations")
+                  .update({ title })
+                  .eq("id", chatId)
+                  .eq("user_id", user.id)
+                  .then()
+                  .catch((err) => {
+                    if (!err.message.includes("relation") || !err.message.includes("does not exist")) {
+                      console.error("Error updating title:", err)
+                    }
+                  })
+              } catch (error) {
+                console.error("Error updating title in database:", error)
+              }
             }
 
             return {
@@ -365,21 +512,39 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     if (!user) throw new Error("User not authenticated")
 
     try {
-      // Delete all messages for this user's chats
-      const chatIds = chats.map((c) => c.id)
-      if (chatIds.length > 0) {
-        const { error: msgError } = await supabase.from("chat_messages").delete().in("chat_id", chatIds)
-
-        if (msgError) throw msgError
+      // Ensure database is initialized
+      if (!dbInitialized) {
+        await initializeDatabase()
+        setDbInitialized(true)
       }
 
-      // Delete all chats
-      const { error: chatError } = await supabase.from("chat_conversations").delete().eq("user_id", user.id)
+      // Try to clear chats from Supabase
+      try {
+        // Delete all messages for this user's chats
+        const chatIds = chats.map((c) => c.id)
+        if (chatIds.length > 0) {
+          const { error: msgError } = await supabase.from("chat_messages").delete().in("chat_id", chatIds)
 
-      if (chatError) throw chatError
+          if (msgError && (!msgError.message.includes("relation") || !msgError.message.includes("does not exist"))) {
+            console.error("Error deleting messages:", msgError)
+          }
+        }
 
+        // Delete all chats
+        const { error: chatError } = await supabase.from("chat_conversations").delete().eq("user_id", user.id)
+
+        if (chatError && (!chatError.message.includes("relation") || !chatError.message.includes("does not exist"))) {
+          console.error("Error deleting chats:", chatError)
+        }
+      } catch (error) {
+        console.error("Error clearing chats from database:", error)
+      }
+
+      // Update local state
       setChats([])
       setActiveChatState(null)
+      localStorage.removeItem(`chats_${user.id}`)
+      localStorage.removeItem(`activeChat_${user.id}`)
     } catch (error) {
       console.error("Error clearing chats:", error)
       throw error
